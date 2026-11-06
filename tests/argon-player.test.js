@@ -4,6 +4,7 @@ import * as game from '../src/game.js';
 import * as rules from '../src/rules.js';
 import { advancePlaybackTime } from '../src/playback-clock.js';
 import { createIndependentBoardStart } from '../scripts/score-independent-start.js';
+import { inspectCampaignPlayerSource } from '../scripts/score-campaign-player-host.js';
 import { ARGON_PLAYER, createArgonPlayer } from '../src/players/argon.js';
 
 function runIndependentLevel(level) {
@@ -33,6 +34,9 @@ function runIndependentLevel(level) {
 test('Argon player metadata and controller lifecycle', () => {
   assert.equal(ARGON_PLAYER.id, 'argon');
   assert.equal(ARGON_PLAYER.name, 'Argon Algorithm');
+  const source = inspectCampaignPlayerSource('src/players/argon');
+  assert.equal(typeof source.sha256, 'string');
+  assert.equal(source.referee.files.length, 5);
   const state = game.createGame({ seed: 0x504143, schedulerPhase: 42 });
   const player = createArgonPlayer(state);
   assert.equal(player.diagnostics().player, ARGON_PLAYER);

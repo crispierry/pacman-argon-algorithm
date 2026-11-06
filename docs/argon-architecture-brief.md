@@ -1,8 +1,8 @@
 # Argon Algorithm: Architecture & Solution Brief
 
 **Branch:** `argon`  
-**Player Module:** `src/players/argon.js` (`ARGON_PLAYER`, `createArgonPlayer`, `createArgonStartState`)  
-**Companion Specification:** [`docs/product-brief.md`](./product-brief.md)
+**Player Modules:** `src/players/argon/` (`score-realtime-controller.js`, `score-v2-worker.js`, `score-cleanup-shadow.js`, `argon-core.js`) and `src/players/argon.js` (`ARGON_PLAYER`, `createArgonRealtimePlayer`, `createArgonPlayer`, `createArgonStartState`)  
+**Companion Specification:** [`docs/product-brief.md`](./product-brief.md), [`docs/argon-campaign-qualification.md`](./argon-campaign-qualification.md)
 
 ---
 
@@ -130,6 +130,16 @@ Once `chainsCompleted === 4`, both fruits have been triggered and resolved (`fru
 - **Zero-Frightened Boards (`nominalPowerSeconds === 0`):** Every 8 active ticks, queries `safeFruitDir(state)` first when a fruit (`5,000`-pt Key on L21+) is active. `safeFruitDir` simulates 180 ticks (`3.0s`) following `fruitDirection` and then `chooseAutoplayDirection`, returning the fruit route only if the fruit is collected AND Pac-Man survives for at least 60 ticks post-collection. Otherwise, executes `chooseAutoplayDirection(state, { scoreSeeking: true, threatDistance: 12, horizon: 240, lateLookahead: false })`.
 - **Level 256 Split Screen:** Uses the same `safeFruitDir ?? chooseAutoplayDirection` policy while `state.pellets.size > 0 || state.fruit`. Once all collectible pellets and the `5,000`-pt Key on the current life are exhausted (`state.pellets.size === 0 && !state.fruit`), routes directly toward the nearest active ghost (`fastRouteDir`) to spend the life and respawn the 9 regenerating right-side dots (`90` points per extra life), finishing at `6,580` points on 4 lives (`3,333,180` total) or `6,490` points on 3 lives.
 
+### 3.8 Real-Time Worker & Controller Architecture (`src/players/argon/`)
+To guarantee strict real-time control delivery within the `16.5 ms` arcade interrupt budget without modifying or pausing the game clock (`src/main.js` and `scripts/evaluate-score-campaign.js`), Argon separates lightweight tick execution from background search:
+- **Self-Contained Candidate Package (`src/players/argon/`):** Contains the 5 pinned physics modules (`arcade-fright-sequence.js`, `game.js`, `maze.js`, `rules.js`, `split-map.js`), `argon-core.js`, and the 3 campaign entry points (`score-realtime-controller.js`, `score-v2-worker.js`, `score-cleanup-shadow.js`).
+- **Precomputed Integer Adjacency & Stamp BFS (`argon-core.js`):** Normal-maze BFS lookups (`getDistArr`, `mazeDist`, `fastRouteDir`) use precomputed 32×28 integer adjacency tables (`NORMAL_ADJ`), cached `Uint8Array(896)` distance maps, and zero-allocation stamp arrays (`bfsStamp`, `bfsQ`, `bfsFirst`).
+- **Chunked Background Worker (`score-v2-worker.js`):** Each call to `computeScoreV2Plan(request)` verifies `canonicalStateKey(sim) === request.anchorStateKey`, performs at most one heavy search (`allowHeavySearch: offset === 0`), and steps out the resulting trajectory up to the next heavy search boundary (`haltBeforeHeavy` or `maxChunkTicks = 480`), reporting exact simulation work (`work = searchWork + verificationWork`) and returning per-tick `preHash`/`postHash` checkpoints plus `endStateKey`.
+- **Pipelined Real-Time Controller (`score-realtime-controller.js`):**
+  - Seeds an initial 240-tick non-blocking prefix (`allowHeavySearch: false`) during `observeInitial` and immediately dispatches the persistent background worker.
+  - Maintains a pipelined lookahead queue of up to `maxQueuedTicks = 9000` (`148.5` seconds of simulated play), keeping the worker 60–148 seconds ahead of the live `16.5 ms` clock so `beforeTick(state)` pops verified moves in `~0.008 ms` mean (`< 1 ms` max).
+  - Validates `preHash` and `anchorStateKey` in `beforeTick(state)` and `ack.appliedInput`, `postHash`, and `endStateKey` in `afterTick(state, events, ack)`. Any state or applied-input divergence immediately invalidates the queue (`invalidate`), advances the live planner into a non-blocking 240-tick survival prefix, and dispatches a fresh worker chunk.
+
 ---
 
 ## 4. Validation & Verification Guide for Other Agents
@@ -161,4 +171,18 @@ npm run evaluate:argon
 You can also evaluate any subset of independent levels directly by passing level numbers:
 ```bash
 npm run evaluate:argon -- 1 9 12 13 15 16 18 19 256
+```
+
+### 4.5 Independent Real-Time Campaign Harness & Replay Qualification
+Runs the self-contained candidate (`src/players/argon`) against the independent referee (`scripts/evaluate-score-campaign.js`) under absolute monotonic `16.5 ms` deadlines, followed by independent outcome replay (`replay:score:campaign`) and deterministic policy replay (`replay:score:player`):
+```bash
+npm run evaluate:score:campaign -- --source src/players/argon --seed 5259587 --phase 42 --max-ticks 8000 --output /tmp/pacman-argon-rt-8000
+npm run replay:score:campaign -- /tmp/pacman-argon-rt-8000/trace.json.gz
+npm run replay:score:player -- /tmp/pacman-argon-rt-8000/trace.json.gz
+```
+For the full 256-board 1x real-time campaign (~4 hours 32 minutes for 989,573 ticks at 60.606 Hz):
+```bash
+npm run evaluate:score:campaign -- --source src/players/argon --seed 5259587 --phase 42 --max-ticks 1500000 --output /tmp/pacman-argon-qualification
+npm run replay:score:campaign -- /tmp/pacman-argon-qualification/trace.json.gz
+npm run replay:score:player -- /tmp/pacman-argon-qualification/trace.json.gz
 ```
